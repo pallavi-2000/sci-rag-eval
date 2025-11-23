@@ -1,5 +1,8 @@
 from pathlib import Path
 import json
+import re
+from collections import defaultdict
+
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import faiss
@@ -48,6 +51,62 @@ def chunk_text(text: str, max_chars: int = 800, min_chars: int = 200):
     return chunks
 
 
+def is_back_matter_page(text: str) -> bool:
+    """
+    Heuristic to skip 'References', 'Acknowledgements', author list pages, etc.
+    Very simple but works surprisingly well for papers.
+    """
+    # Look at the first non-empty line
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    first_line = lines[0].lower() if lines else ""
+
+    back_matter_keywords = [
+        "references",
+        "acknowledgements",
+        "acknowledgments",
+        "bibliography",
+        "author contributions",
+        "all authors and affiliations",
+        "all authors and aﬃliations",
+    ]
+
+    for kw in back_matter_keywords:
+        if kw in first_line:
+            return True
+
+    # If the page is basically a reference list full of DOIs / URLs
+    lowered = text.lower()
+    if lowered.count("doi") > 5 or lowered.count("https://") > 5 or lowered.count("arxiv.org") > 5:
+        return True
+
+    return False
+
+
+def looks_like_reference_block(text: str) -> bool:
+    """
+    Heuristic to detect chunks that are basically reference lists:
+    lots of years + journal abbreviations + DOIs.
+    """
+    lowered = text.lower()
+
+    # Count years like 1997, 2004, 2010, 2021, etc.
+    years = re.findall(r"\b(19\d{2}|20\d{2})\b", text)
+    year_count = len(years)
+
+    # Check for typical astro journal/metadata tokens
+    journal_tokens = ["apj", "a&a", "mnras", "phys. rev.", "cqgra", "aap"]
+    meta_tokens = ["doi", "arxiv.org", "https://"]
+
+    has_journal = any(tok in lowered for tok in journal_tokens)
+    has_meta = any(tok in lowered for tok in meta_tokens)
+
+    # Tune thresholds – this is deliberately strict
+    if year_count >= 5 and (has_journal or has_meta):
+        return True
+
+    return False
+
+
 def build_chunks(records):
     """
     From page-level records, build a list of chunk dicts:
@@ -57,7 +116,24 @@ def build_chunks(records):
       "page_num": int,
       "text": str
     }
+
+    We:
+    - Restrict to the first CONTENT_PAGE_LIMIT pages of each paper
+    - Also apply a text-based heuristic to skip obvious back matter
+    - Filter out reference-like chunks
     """
+
+    # Hard cutoff for content pages (tune this!)
+    CONTENT_PAGE_LIMIT = 15  # e.g. only pages 1–15 per paper
+
+    # (Optional) compute max page per paper if needed later
+    max_page_by_paper = defaultdict(int)
+    for rec in records:
+        pid = rec["paper_id"]
+        page = rec["page_num"]
+        if page > max_page_by_paper[pid]:
+            max_page_by_paper[pid] = page
+
     chunks = []
     chunk_id = 0
 
@@ -66,8 +142,22 @@ def build_chunks(records):
         page_num = rec["page_num"]
         text = rec["text"]
 
+        # Skip pages beyond the content limit
+        if page_num > CONTENT_PAGE_LIMIT:
+            continue
+
+        # Skip pages that look like back matter
+        if is_back_matter_page(text):
+            continue
+
+        # Chunk the page
         page_chunks = chunk_text(text)
+
         for ch in page_chunks:
+            # Skip chunks that are basically references
+            if looks_like_reference_block(ch):
+                continue
+
             chunks.append({
                 "chunk_id": chunk_id,
                 "paper_id": paper_id,
@@ -76,6 +166,7 @@ def build_chunks(records):
             })
             chunk_id += 1
 
+    print(f"Created {len(chunks)} chunks after content-page filtering.")
     return chunks
 
 
