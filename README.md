@@ -4,7 +4,7 @@ Evaluation-first Retrieval-Augmented Generation (RAG) system over scientific and
 
 ## Goals
 
-- Ingest and chunk scientific/dental PDFs
+- Ingest and chunk scientific pdfs.
 - Build a vector search index over document chunks
 - Answer questions with a RAG pipeline using LLMs
 - Provide citations to exact source locations (paper + page)
