@@ -1,73 +1,75 @@
 from pathlib import Path
 import json
-from pypdf import PdfReader
+
+import fitz  # PyMuPDF
 
 
-# Folders
-RAW_DIR = Path("data/raw")
-OUT_DIR = Path("data/processed")
-OUT_FILE = OUT_DIR / "papers_raw.jsonl"
+BASE_DIR = Path(__file__).resolve().parent.parent
+PAPERS_DIR = BASE_DIR / "data" / "papers"
+PROCESSED_DIR = BASE_DIR / "data" / "processed"
+OUT_FILE = PROCESSED_DIR / "papers_raw.jsonl"
 
 
-def extract_pdf(pdf_path: Path):
+def extract_paper(pdf_path: Path):
     """
-    Read one PDF and return a list of records:
-    {
-      "paper_id": <filename without .pdf>,
-      "page_num": <1-based page index>,
-      "text": <page text>
-    }
+    Extract plain text per page from a PDF using PyMuPDF.
+    Returns a list of records with fields:
+      - paper_id     (stem of filename)
+      - page_num     (1-based)
+      - total_pages
+      - text
     """
-    reader = PdfReader(str(pdf_path))
+    doc = fitz.open(pdf_path)
+    total_pages = doc.page_count
+    paper_id = pdf_path.stem
+
     records = []
-
-    for i, page in enumerate(reader.pages):
-        try:
-            text = page.extract_text()
-        except Exception as e:
-            print(f"Error reading page {i+1} of {pdf_path.name}: {e}")
-            continue
-
-        if not text or not text.strip():
-            # skip empty pages
-            continue
-
-        records.append({
-            "paper_id": pdf_path.stem,
-            "page_num": i + 1,
-            "text": text,
-        })
-
+    for i, page in enumerate(doc, start=1):
+        text = page.get_text("text")
+        text = text.replace("\r", " ").strip()
+        records.append(
+            {
+                "paper_id": paper_id,
+                "page_num": i,
+                "total_pages": total_pages,
+                "text": text,
+            }
+        )
+    doc.close()
     return records
 
 
 def main():
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
-    pdf_files = sorted(RAW_DIR.glob("*.pdf"))
+    if not PAPERS_DIR.exists():
+        raise FileNotFoundError(
+            f"{PAPERS_DIR} does not exist. Put your PDFs in data/papers/"
+        )
+
+    pdf_files = sorted(PAPERS_DIR.glob("*.pdf"))
     if not pdf_files:
-        print(f"No PDF files found in {RAW_DIR.resolve()}")
-        return
+        raise FileNotFoundError(f"No PDFs found in {PAPERS_DIR}")
+
+    print(f"Found {len(pdf_files)} PDF(s):")
+    for pdf in pdf_files:
+        print(f"  - {pdf.name}")
 
     all_records = []
-
-    print(f"Found {len(pdf_files)} PDF(s) in {RAW_DIR}...")
     for pdf in pdf_files:
-        print(f"\nProcessing {pdf.name} ...")
-        recs = extract_pdf(pdf)
-        print(f"  -> {len(recs)} page(s) with text")
+        print(f"\nExtracting from {pdf.name} ...")
+        recs = extract_paper(pdf)
+        print(f"  -> {len(recs)} pages extracted.")
         all_records.extend(recs)
 
-    if not all_records:
-        print("No text extracted from any PDFs.")
-        return
+    print(f"\nTotal pages extracted across all papers: {len(all_records)}")
 
-    # Write everything to a JSONL file
+    print(f"Writing JSONL to {OUT_FILE} ...")
     with OUT_FILE.open("w", encoding="utf-8") as f:
         for rec in all_records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-    print(f"\n✅ Done! Saved {len(all_records)} records to {OUT_FILE}")
+    print("\n✅ Done! Page-level records written to data/processed/papers_raw.jsonl")
 
 
 if __name__ == "__main__":

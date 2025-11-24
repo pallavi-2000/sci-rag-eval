@@ -6,27 +6,30 @@ import torch
 
 from rag_qa import retrieve_chunks, pretty_print_results
 
+MODEL_NAME = "google/flan-t5-large"
 
-MODEL_NAME = "google/flan-t5-small"
+# Cache for reuse
+_tokenizer = None
+_model = None
+_device = None
 
 
 def load_local_model(model_name: str = MODEL_NAME):
-    """
-    Load a small local text2text model (FLAN-T5) for QA.
-    Runs on CPU by default, no API key needed.
-    """
+    global _tokenizer, _model, _device
+
+    if _tokenizer is not None:
+        return _tokenizer, _model, _device
+
     print(f"Loading local model: {model_name} ...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    return tokenizer, model, device
+    _tokenizer = AutoTokenizer.from_pretrained(model_name)
+    _model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+    _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    _model.to(_device)
+
+    return _tokenizer, _model, _device
 
 
 def build_context_block(results: List[Tuple[float, dict]], max_chars: int = 4000) -> str:
-    """
-    Turn retrieved chunks into a single context string with source headers.
-    """
     pieces = []
     total_len = 0
 
@@ -48,25 +51,17 @@ def build_context_block(results: List[Tuple[float, dict]], max_chars: int = 4000
 
 
 def build_prompt(question: str, context: str) -> str:
-    """
-    Build a prompt for FLAN-T5.
-    FLAN-T5 works well with instruction-style prompts.
-    """
-    prompt = (
+    return (
         "You are a careful scientific assistant. "
         "Answer the question using ONLY the context below. "
         "If the answer is not clearly supported by the context, say: "
         "'Not enough information in the documents to answer this confidently.'\n\n"
         "Write your answer as one or two complete sentences. "
-        "Include any numerical values and units explicitly. "
-        "Do not answer with a single word like 'sensitivity' or 'GW200105' "
-        "unless that single word is itself the full correct answer.\n\n"
+        "Include any numerical values and units explicitly.\n\n"
         f"Context:\n{context}\n\n"
         f"Question: {question}\n"
         "Answer:"
     )
-    return prompt
-
 
 
 def generate_answer_local(
@@ -77,26 +72,22 @@ def generate_answer_local(
     paper_id: str | None = None,
 ):
     """
-    Full RAG pipeline with a local model:
-    1. Retrieve top_k chunks (optionally restricted to a given paper_id).
-    2. Build a prompt with those chunks as context.
-    3. Generate an answer using FLAN-T5 locally.
+    Full RAG pipeline:
+    1. Retrieve chunks (optionally filtered by paper_id).
+    2. Build prompt.
+    3. Generate answer with FLAN-T5.
     """
-    # 1. Retrieve chunks (optionally filtered)
     results = retrieve_chunks(question, top_k=top_k, paper_id=paper_id)
 
     if not results:
-        print("No retrieval results found. Cannot answer.")
-        return None, []
+        print("⚠️ Retrieval returned no chunks — cannot answer.")
+        return "Not enough information in the documents to answer this confidently.", []
 
-    # 2. Build context + prompt
     context = build_context_block(results)
     prompt = build_prompt(question, context)
 
-    # 3. Load model & tokenizer
     tokenizer, model, device = load_local_model(model_name)
 
-    # 4. Tokenize & generate
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True).to(device)
     output_ids = model.generate(
         **inputs,
@@ -105,6 +96,9 @@ def generate_answer_local(
     )
     answer = tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
 
+    if not answer:
+        answer = "Not enough information in the documents to answer this confidently."
+
     return answer, results
 
 
@@ -112,30 +106,13 @@ def main():
     parser = argparse.ArgumentParser(
         description="RAG QA with a local FLAN-T5 model (no API, no cost)."
     )
-    parser.add_argument(
-        "question",
-        type=str,
-        nargs="*",
-        help="Question to ask about the documents (if empty, you will be prompted).",
-    )
-    parser.add_argument(
-        "--top_k",
-        type=int,
-        default=5,
-        help="Number of chunks to retrieve.",
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default=MODEL_NAME,
-        help="Hugging Face model name to use.",
-    )
+    parser.add_argument("question", type=str, nargs="*", help="Question to ask.")
+    parser.add_argument("--top_k", type=int, default=5, help="Number of chunks to retrieve.")
+    parser.add_argument("--model", type=str, default=MODEL_NAME, help="HF model name.")
+    parser.add_argument("--paper_id", type=str, default=None, help="Optional paper filter.")
     args = parser.parse_args()
 
-    if args.question:
-        question = " ".join(args.question)
-    else:
-        question = input("Enter your question: ").strip()
+    question = " ".join(args.question) if args.question else input("Enter your question: ").strip()
 
     if not question:
         print("No question provided.")
@@ -147,10 +124,8 @@ def main():
         question=question,
         top_k=args.top_k,
         model_name=args.model,
+        paper_id=args.paper_id,
     )
-
-    if answer is None:
-        return
 
     print("===== LOCAL MODEL ANSWER =====\n")
     print(answer)
